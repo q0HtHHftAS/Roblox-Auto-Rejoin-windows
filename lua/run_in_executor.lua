@@ -53,15 +53,43 @@ local function encode(value)
     return value
 end
 
+local function selectedPlayer()
+    local ok, players = pcall(function()
+        return game:GetService("Players")
+    end)
+    return ok and players and players.LocalPlayer or nil
+end
+
 local function selectedAccount()
     if tostring(CRONUS_ACCOUNT or "") ~= "" then
         return CRONUS_ACCOUNT
     end
-    local ok, players = pcall(function()
-        return game:GetService("Players")
-    end)
-    local player = ok and players and players.LocalPlayer or nil
+    local player = selectedPlayer()
     return player and tostring(player.Name or "") or ""
+end
+
+local function selectedUserId()
+    local player = selectedPlayer()
+    return player and tostring(player.UserId or "") or ""
+end
+
+local function getProcessId()
+    local providers = {
+        rawget(_G, "getprocessid"),
+        rawget(_G, "get_process_id"),
+        rawget(_G, "getpid"),
+        rawget(_G, "get_pid"),
+    }
+    for _, provider in ipairs(providers) do
+        if type(provider) == "function" then
+            local ok, result = pcall(provider)
+            local pid = tonumber(result)
+            if ok and pid and pid > 0 then
+                return tostring(math.floor(pid))
+            end
+        end
+    end
+    return ""
 end
 
 local function queueOnTeleport(sourceCode)
@@ -90,10 +118,14 @@ local function queueOnTeleport(sourceCode)
     return false
 end
 
-local url = ("http://%s:%s/api/lua/rejoin-helper?account=%s"):format(
+local account = selectedAccount()
+local url = ("http://%s:%s/api/lua/rejoin-helper?bootstrap=1&account=%s&username=%s&user_id=%s&pid=%s"):format(
     CRONUS_HOST,
     tostring(CRONUS_PORT),
-    encode(selectedAccount())
+    encode(account),
+    encode(account),
+    encode(selectedUserId()),
+    encode(getProcessId())
 )
 
 local source = nil
@@ -119,7 +151,7 @@ if type(source) ~= "string" or #source <= 0 then
 end
 assert(type(Load) == "function", "executor does not expose loadstring/load")
 if source:sub(1, 1) == "{" then
-    failDownload("Cronus returned JSON instead of Lua. Restart Cronus Launcher or check the port.", statusCode, source)
+    failDownload("Cronus returned JSON instead of Lua. Start this account from Cronus and check the port.", statusCode, source)
 end
 if not source:find("CronusRejoin", 1, true) then
     failDownload("Downloaded text is not the Cronus rejoin monitor", statusCode, source)

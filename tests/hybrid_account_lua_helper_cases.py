@@ -88,7 +88,10 @@ class HybridAccountLuaHelperCases:
         self.assertNotIn("__CRONUS_", script)
         loader = (Path(__file__).resolve().parents[1] / "lua" / "run_in_executor.lua").read_text(encoding="utf-8")
         self.assertIn("/api/lua/rejoin-helper", loader)
+        self.assertIn("bootstrap=1", loader)
         self.assertIn("local Load = loadstring or load", loader)
+        self.assertIn("getProcessId()", loader)
+        self.assertIn("user_id=%s", loader)
         self.assertIn("queueOnTeleport(source)", loader)
         self.assertIn('log("helper queued for teleport")', loader)
         self.assertIn("Load(source)", loader)
@@ -110,6 +113,31 @@ class HybridAccountLuaHelperCases:
 
         self.assertEqual(response.status_code, 403)
         self.assertNotIn('Token = "lua1.', response.text)
+
+    def test_lua_rejoin_helper_bootstrap_serves_scoped_token_for_active_loopback_account(self):
+        from fastapi.testclient import TestClient
+        import main
+
+        account = Account("LuaUnit")
+        account.session_id = "session-unit"
+        account.launch_nonce = "nonce-unit"
+        account.pid = 4321
+        old_accounts = main.farm._accounts
+        main.farm._accounts = [account]
+        client = TestClient(main.app)
+        try:
+            response = client.get(
+                "/api/lua/rejoin-helper?bootstrap=1&account=LuaUnit&username=LuaUnit&pid=4321&port=7777"
+            )
+        finally:
+            main.farm._accounts = old_accounts
+
+        self.assertEqual(response.status_code, 200)
+        script = response.text
+        self.assertNotIn(main.INSTANCE_TOKEN, script)
+        self.assertIn('Token = "lua1.', script)
+        self.assertIn('SessionId = "session-unit"', script)
+        self.assertIn('LaunchNonce = "nonce-unit"', script)
 
     def test_lua_rejoin_helper_reuses_existing_scoped_token_without_renewal(self):
         from fastapi.testclient import TestClient

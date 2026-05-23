@@ -147,6 +147,10 @@ def _lua_scope_for_payload(farm: Any, body: Dict[str, Any]) -> Optional[Dict[str
 
 def _issue_lua_token(ctx: ApiContext, account: str) -> Dict[str, str]:
     scope = _lua_scope_for_account(ctx.farm, account)
+    return _issue_lua_token_for_scope(ctx, scope)
+
+
+def _issue_lua_token_for_scope(ctx: ApiContext, scope: Dict[str, str]) -> Dict[str, str]:
     token = issue_lua_session_token(
         str(ctx.instance_token or ""),
         account=scope["account"],
@@ -172,6 +176,10 @@ def _validate_lua_helper_access(ctx: ApiContext, request: Request, account: str)
     if api_token_valid(request, str(ctx.instance_token or "")):
         return None
 
+    bootstrap_scope = _validate_lua_bootstrap_access(ctx, request, account)
+    if bootstrap_scope:
+        return bootstrap_scope
+
     supplied_token = _lua_request_token(request, {})
     reject_reason = "missing_token"
     if supplied_token:
@@ -187,15 +195,7 @@ def _validate_lua_helper_access(ctx: ApiContext, request: Request, account: str)
             return {**scope, "token": supplied_token}
         reject_reason = validation.reason or "invalid_lua_session_token"
 
-    flog_kv(
-        "LUA",
-        "helper_rejected",
-        "warning",
-        reason=reject_reason,
-        account=str(account or ""),
-        client=str(getattr(getattr(request, "client", None), "host", "") or ""),
-    )
-    raise HTTPException(403, "Invalid API token")
+    _reject_lua_helper_request(request, account, reject_reason)
 
 
 def _render_rejoin_helper(
@@ -280,6 +280,67 @@ def _is_loopback_request(request: Request) -> bool:
     client = getattr(request, "client", None)
     host = str(getattr(client, "host", "") or "").strip().lower()
     return host in {"127.0.0.1", "::1", "localhost", "testclient"} or host.startswith("::ffff:127.")
+
+
+def _query_enabled(request: Request, key: str) -> bool:
+    return str(request.query_params.get(key) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _reject_lua_helper_request(
+    request: Request,
+    account: str,
+    reason: str,
+    *,
+    status_code: int = 403,
+    detail: str = "Invalid API token",
+) -> None:
+    flog_kv(
+        "LUA",
+        "helper_rejected",
+        "warning",
+        reason=reason,
+        account=str(account or ""),
+        client=str(getattr(getattr(request, "client", None), "host", "") or ""),
+    )
+    raise HTTPException(status_code, detail)
+
+
+def _validate_lua_bootstrap_access(ctx: ApiContext, request: Request, account: str) -> Optional[Dict[str, str]]:
+    if not _query_enabled(request, "bootstrap"):
+        return None
+    if not _is_loopback_request(request):
+        _reject_lua_helper_request(request, account, "bootstrap_non_loopback")
+
+    payload = {
+        "account": str(account or request.query_params.get("account") or ""),
+        "username": str(request.query_params.get("username") or account or ""),
+        "configured_account": str(request.query_params.get("configured_account") or account or ""),
+        "user_id": str(request.query_params.get("user_id") or ""),
+        "pid": str(request.query_params.get("pid") or ""),
+    }
+    resolution = resolve_lua_account(getattr(ctx.farm, "_accounts", []) or [], payload)
+    if resolution.ambiguous:
+        _reject_lua_helper_request(request, account, "bootstrap_ambiguous_account")
+    if not resolution.account:
+        _reject_lua_helper_request(request, account, "bootstrap_account_not_found")
+
+    scope = {
+        "account": resolution.account_key,
+        **_account_session_fields(resolution.account),
+    }
+    if not scope["session_id"] or not scope["launch_nonce"]:
+        _reject_lua_helper_request(
+            request,
+            account,
+            "bootstrap_inactive_session",
+            status_code=409,
+            detail="Lua bootstrap requires an active Cronus launch session",
+        )
+
+    if resolution.bound_pid and (resolution.identity.pid is None or not resolution.pid_match):
+        _reject_lua_helper_request(request, account, "bootstrap_pid_mismatch")
+
+    return _issue_lua_token_for_scope(ctx, scope)
 
 
 def _local_fallback_allowed(request: Request, body: Dict[str, Any], transport: str) -> bool:
